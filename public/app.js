@@ -29,6 +29,8 @@ let screenName = "";
 let clientId = null;
 let pendingJoinRoomId = null;
 let localStream = null;
+let preferredDeviceId = null;
+let isSwitchingDevice = false;
 let testToneEnabled = false;
 let testToneContext = null;
 let testToneOscillator = null;
@@ -236,14 +238,57 @@ async function createRoom(name) {
   await fetchRooms();
 }
 
-async function ensureLocalStream() {
-  if (localStream) return localStream;
-  localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  ensureMeterContext();
-  if (meterContext && meterContext.state === "suspended") {
-    meterContext.resume();
+function buildAudioConstraints() {
+  const base = {
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false,
+    channelCount: 1,
+    sampleRate: 48000,
+    sampleSize: 16,
+  };
+  if (preferredDeviceId) {
+    return { ...base, deviceId: { exact: preferredDeviceId } };
   }
-  return localStream;
+  return base;
+}
+
+async function startLocalStream({ force = false } = {}) {
+  if (localStream && !force) return localStream;
+  if (isSwitchingDevice) return localStream;
+  isSwitchingDevice = true;
+  try {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: buildAudioConstraints(),
+      });
+    } catch (err) {
+      // Fallback if exact device constraints fail.
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    }
+    if (localStream) {
+      localStream.getTracks().forEach((track) => track.stop());
+    }
+    localStream = stream;
+    const settings = localStream.getAudioTracks?.()[0]?.getSettings?.();
+    if (!preferredDeviceId && settings?.deviceId) {
+      preferredDeviceId = settings.deviceId;
+    }
+    ensureMeterContext();
+    if (meterContext && meterContext.state === "suspended") {
+      meterContext.resume();
+    }
+    updateOutgoingTracks();
+    ensureLocalMeter();
+    return localStream;
+  } finally {
+    isSwitchingDevice = false;
+  }
+}
+
+async function ensureLocalStream() {
+  return startLocalStream({ force: false });
 }
 
 function getOutgoingTracks() {
@@ -387,6 +432,7 @@ function toggleTestTone() {
     }
   } else {
     stopTestTone();
+    startLocalStream({ force: true });
   }
   updateOutgoingTracks();
   updateSessionView();
@@ -633,6 +679,26 @@ createRoomForm.addEventListener("submit", async (event) => {
   await createRoom(String(name));
   createRoomForm.reset();
 });
+
+if (navigator.mediaDevices?.addEventListener) {
+  navigator.mediaDevices.addEventListener("devicechange", async () => {
+    if (testToneEnabled) return;
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const audioInputs = devices.filter((device) => device.kind === "audioinput");
+    const currentTrack = localStream?.getAudioTracks?.()[0];
+    if (currentTrack) {
+      const settings = currentTrack.getSettings?.();
+      const currentId = settings?.deviceId;
+      const stillExists = audioInputs.some((d) => d.deviceId === currentId);
+      if (!stillExists) {
+        preferredDeviceId = audioInputs[0]?.deviceId || null;
+        await startLocalStream({ force: true });
+      }
+    } else if (currentRoomId) {
+      await startLocalStream({ force: true });
+    }
+  });
+}
 
 joinForm.addEventListener("submit", async (event) => {
   event.preventDefault();
