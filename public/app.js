@@ -41,6 +41,8 @@ let meterContext = null;
 let meterAnimation = null;
 const meters = new Map();
 const meterBars = new Map();
+let audioInputs = [];
+let deviceRefreshInFlight = false;
 const peers = new Map();
 
 function setConnectionState(state) {
@@ -253,11 +255,27 @@ function buildAudioConstraints() {
   return base;
 }
 
+async function pickPreferredAudioDevice() {
+  if (!navigator.mediaDevices?.enumerateDevices) return;
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  audioInputs = devices.filter((d) => d.kind === "audioinput");
+  if (!audioInputs.length) return;
+  const bluetooth = audioInputs.find((d) =>
+    /bluetooth|airpods|headset|bt/i.test(d.label || "")
+  );
+  if (bluetooth) {
+    preferredDeviceId = bluetooth.deviceId;
+  } else if (!preferredDeviceId) {
+    preferredDeviceId = audioInputs[0].deviceId;
+  }
+}
+
 async function startLocalStream({ force = false } = {}) {
   if (localStream && !force) return localStream;
   if (isSwitchingDevice) return localStream;
   isSwitchingDevice = true;
   try {
+    await pickPreferredAudioDevice();
     let stream;
     try {
       stream = await navigator.mediaDevices.getUserMedia({
@@ -360,6 +378,49 @@ function syncMeterBarsFromDOM() {
   document.querySelectorAll(".meter-bar[data-meter-id]").forEach((el) => {
     meterBars.set(el.dataset.meterId, el);
   });
+}
+
+function renderMicSelector(container) {
+  const wrapper = document.createElement("div");
+  const label = document.createElement("label");
+  label.textContent = "Microphone";
+  label.className = "muted";
+  const select = document.createElement("select");
+  select.id = "micSelect";
+
+  if (!audioInputs.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "Loading microphones…";
+    select.appendChild(opt);
+    if (!deviceRefreshInFlight) {
+      deviceRefreshInFlight = true;
+      pickPreferredAudioDevice()
+        .catch(() => {})
+        .finally(() => {
+          deviceRefreshInFlight = false;
+          updateSessionView();
+        });
+    }
+  } else {
+    audioInputs.forEach((device) => {
+      const opt = document.createElement("option");
+      opt.value = device.deviceId;
+      opt.textContent = device.label || "Microphone";
+      select.appendChild(opt);
+    });
+    select.value = preferredDeviceId || audioInputs[0].deviceId;
+  }
+
+  select.addEventListener("change", async (event) => {
+    const value = event.target.value;
+    if (!value) return;
+    preferredDeviceId = value;
+    await startLocalStream({ force: true });
+  });
+
+  wrapper.append(label, select);
+  container.appendChild(wrapper);
 }
 
 function ensureLocalMeter() {
@@ -555,6 +616,8 @@ function updateSessionView() {
   header.append(title, sub, leaveBtn, toneBtn);
   sessionView.appendChild(header);
 
+  renderMicSelector(sessionView);
+
   const participantsTitle = document.createElement("h4");
   participantsTitle.textContent = "Participants";
   sessionView.appendChild(participantsTitle);
@@ -683,8 +746,9 @@ createRoomForm.addEventListener("submit", async (event) => {
 if (navigator.mediaDevices?.addEventListener) {
   navigator.mediaDevices.addEventListener("devicechange", async () => {
     if (testToneEnabled) return;
+    await pickPreferredAudioDevice();
     const devices = await navigator.mediaDevices.enumerateDevices();
-    const audioInputs = devices.filter((device) => device.kind === "audioinput");
+    audioInputs = devices.filter((device) => device.kind === "audioinput");
     const currentTrack = localStream?.getAudioTracks?.()[0];
     if (currentTrack) {
       const settings = currentTrack.getSettings?.();
@@ -697,6 +761,7 @@ if (navigator.mediaDevices?.addEventListener) {
     } else if (currentRoomId) {
       await startLocalStream({ force: true });
     }
+    updateSessionView();
   });
 }
 
