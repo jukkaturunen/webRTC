@@ -35,6 +35,10 @@ let testToneOscillator = null;
 let testToneGain = null;
 let testToneDestination = null;
 let testToneTrack = null;
+let meterContext = null;
+let meterAnimation = null;
+const meters = new Map();
+const meterBars = new Map();
 const peers = new Map();
 
 function setConnectionState(state) {
@@ -235,6 +239,10 @@ async function createRoom(name) {
 async function ensureLocalStream() {
   if (localStream) return localStream;
   localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  ensureMeterContext();
+  if (meterContext && meterContext.state === "suspended") {
+    meterContext.resume();
+  }
   return localStream;
 }
 
@@ -244,6 +252,88 @@ function getOutgoingTracks() {
   }
   if (!localStream) return [];
   return localStream.getAudioTracks();
+}
+
+function ensureMeterContext() {
+  if (!meterContext) {
+    meterContext = new AudioContext();
+  }
+  return meterContext;
+}
+
+function startMeterLoop() {
+  if (meterAnimation) return;
+  const tick = () => {
+    meters.forEach((meter, id) => {
+      const bar = meterBars.get(id);
+      if (!bar) return;
+      meter.analyser.getFloatTimeDomainData(meter.data);
+      let sum = 0;
+      for (let i = 0; i < meter.data.length; i += 1) {
+        const sample = meter.data[i];
+        sum += sample * sample;
+      }
+      const rms = Math.sqrt(sum / meter.data.length);
+      const level = Math.min(rms * 3, 1);
+      bar.style.width = `${Math.round(level * 100)}%`;
+    });
+    meterAnimation = requestAnimationFrame(tick);
+  };
+  meterAnimation = requestAnimationFrame(tick);
+}
+
+function createMeter(id, stream, trackId) {
+  if (!stream) return;
+  const ctx = ensureMeterContext();
+  if (ctx.state === "suspended") {
+    ctx.resume();
+  }
+  const source = ctx.createMediaStreamSource(stream);
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  source.connect(analyser);
+  const data = new Float32Array(analyser.fftSize);
+  meters.set(id, { analyser, data, source, trackId });
+  startMeterLoop();
+}
+
+function removeMeter(id) {
+  const meter = meters.get(id);
+  if (meter) {
+    try {
+      meter.source.disconnect();
+    } catch (err) {
+      // ignore
+    }
+  }
+  meters.delete(id);
+  meterBars.delete(id);
+}
+
+function syncMeterBarsFromDOM() {
+  meterBars.clear();
+  document.querySelectorAll(".meter-bar[data-meter-id]").forEach((el) => {
+    meterBars.set(el.dataset.meterId, el);
+  });
+}
+
+function ensureLocalMeter() {
+  const track = getOutgoingTracks()[0];
+  if (!track) return;
+  const existing = meters.get("local");
+  if (existing && existing.trackId === track.id) return;
+  if (existing) removeMeter("local");
+  const stream = new MediaStream([track]);
+  createMeter("local", stream, track.id);
+}
+
+function ensurePeerMeter(peerId, stream) {
+  const track = stream?.getAudioTracks?.()[0];
+  if (!track) return;
+  const existing = meters.get(peerId);
+  if (existing && existing.trackId === track.id) return;
+  if (existing) removeMeter(peerId);
+  createMeter(peerId, stream, track.id);
 }
 
 function ensureTestToneTrack() {
@@ -285,6 +375,7 @@ function updateOutgoingTracks() {
       peer.pc.addTrack(track, new MediaStream([track]));
     }
   });
+  ensureLocalMeter();
 }
 
 function toggleTestTone() {
@@ -304,7 +395,13 @@ function toggleTestTone() {
 function createPeerConnection(peerId, peerName) {
   if (peers.has(peerId)) return;
   const pc = new RTCPeerConnection(rtcConfig);
-  const peer = { id: peerId, name: peerName || "Guest", pc, audio: null };
+  const peer = {
+    id: peerId,
+    name: peerName || "Guest",
+    pc,
+    audio: null,
+    stream: null,
+  };
   peers.set(peerId, peer);
 
   const outgoingTracks = getOutgoingTracks();
@@ -329,7 +426,9 @@ function createPeerConnection(peerId, peerName) {
       peer.audio.playsInline = true;
       audioBin.appendChild(peer.audio);
     }
-    peer.audio.srcObject = event.streams[0];
+    peer.stream = event.streams[0];
+    peer.audio.srcObject = peer.stream;
+    ensurePeerMeter(peer.id, peer.stream);
   });
 
   pc.addEventListener("connectionstatechange", () => {
@@ -420,18 +519,47 @@ function updateSessionView() {
   const you = document.createElement("div");
   you.className = "participant";
   const youStatus = testToneEnabled ? "Test tone" : "Mic on";
-  you.innerHTML = `<span>${screenName || "Guest"} (you)</span><em class="muted">${youStatus}</em>`;
+  const youName = document.createElement("span");
+  youName.textContent = `${screenName || "Guest"} (you)`;
+  const youMeter = document.createElement("div");
+  youMeter.className = "meter";
+  const youBar = document.createElement("div");
+  youBar.className = "meter-bar";
+  youBar.dataset.meterId = "local";
+  youMeter.appendChild(youBar);
+  const youMeta = document.createElement("em");
+  youMeta.className = "muted";
+  youMeta.textContent = youStatus;
+  you.append(youName, youMeter, youMeta);
   list.appendChild(you);
 
   peers.forEach((peer) => {
     const item = document.createElement("div");
     item.className = "participant";
     const status = peer.pc.connectionState || "new";
-    item.innerHTML = `<span>${peer.name}</span><em class="muted">${status}</em>`;
+    const name = document.createElement("span");
+    name.textContent = peer.name;
+    const meter = document.createElement("div");
+    meter.className = "meter";
+    const bar = document.createElement("div");
+    bar.className = "meter-bar";
+    bar.dataset.meterId = peer.id;
+    meter.appendChild(bar);
+    const meta = document.createElement("em");
+    meta.className = "muted";
+    meta.textContent = status;
+    item.append(name, meter, meta);
     list.appendChild(item);
   });
 
   sessionView.appendChild(list);
+  syncMeterBarsFromDOM();
+  ensureLocalMeter();
+  peers.forEach((peer) => {
+    if (peer.stream) {
+      ensurePeerMeter(peer.id, peer.stream);
+    }
+  });
 }
 
 function removePeer(peerId) {
@@ -442,6 +570,7 @@ function removePeer(peerId) {
     peer.audio.srcObject = null;
     peer.audio.remove();
   }
+  removeMeter(peerId);
   peers.delete(peerId);
 }
 
@@ -452,6 +581,7 @@ function cleanupPeerConnections() {
       peer.audio.srcObject = null;
       peer.audio.remove();
     }
+    removeMeter(peer.id);
   });
   peers.clear();
   updateSessionView();
@@ -487,6 +617,7 @@ function leaveRoom(silent) {
     testToneEnabled = false;
     stopTestTone();
   }
+  removeMeter("local");
   cleanupPeerConnections();
   updateSessionView();
   if (!silent) {
