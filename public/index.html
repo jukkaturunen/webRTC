@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>WebRTC Audio Rooms</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app">
+      <header class="top">
+        <div>
+          <h1>Audio Rooms</h1>
+          <p class="subtitle">Create, join, and talk instantly.</p>
+        </div>
+        <div class="status" id="connectionStatus">
+          <span class="dot" id="statusDot"></span>
+          <span id="statusText">Connecting…</span>
+        </div>
+      </header>
+
+      <main class="grid">
+        <section class="card">
+          <h2>Create Room</h2>
+          <form id="createRoomForm" class="inline">
+            <input
+              type="text"
+              name="roomName"
+              placeholder="Room name"
+              maxlength="64"
+              required
+            />
+            <button type="submit">Create</button>
+          </form>
+        </section>
+
+        <section class="card">
+          <h2>Available Rooms</h2>
+          <div class="rooms" id="roomList">
+            <p class="muted">Loading rooms…</p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Your Session</h2>
+          <div id="sessionView">
+            <p class="muted">Not in a room.</p>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="joinDialog">
+      <form id="joinForm" method="dialog">
+        <h3>Join Room</h3>
+        <p id="joinRoomName" class="muted"></p>
+        <label>
+          Screen name
+          <input
+            type="text"
+            name="screenName"
+            placeholder="Your name"
+            maxlength="32"
+            required
+          />
+        </label>
+        <div class="dialog-actions">
+          <button type="button" id="cancelJoin">Cancel</button>
+          <button type="submit">Join</button>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="app.js"></script>
+  </body>
+</html>
